@@ -1,3 +1,17 @@
+# SPOTLIGHT and SAMSUNG SMART TV OLD MODELS #
+About this, the general idea is the old Smart TV Samsung (2011,2012,2013 and 2014), work with 5-way Navigation of Spotlight.
+To do this I make a new map of keys with the keyCode asigned in the Samsung Platform. 
+Arrow Keys		Samsung TV		Spotlight
+	UP		29460			38
+	DOWN		29461			40
+	LEFT		4			37
+	RIGHT		5			39
+	ENTER		29443			13
+Like you see is very diferent the standard keyCode of a normal keyboard
+when the platform is samsung old model the key code change dinamicaly.
+
+Thanks.
+
 # SPOTLIGHT DOCUMENTATION #
 
 1. [What Is Spotlight?](#1)
