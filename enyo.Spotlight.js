@@ -47,18 +47,6 @@ enyo.Spotlight = new function() {
         _bInitialized = false,
 
         /**
-        * State variable allowing us to suppress Spotlight select on
-        * keyup in the specific case where a press of the [Enter] key
-        * has just triggered a switch from pointer mode to 5-way mode
-        * (since we only want to switch modes in this case, not perform
-        * a selection)
-        * @type {Boolean}
-        * @default false
-        * @private
-        */
-        _bSuppressSelectOnNextKeyUp = false,
-
-        /**
         * The currently spotted element.
         * @type {Object}
         * @default null
@@ -107,17 +95,6 @@ enyo.Spotlight = new function() {
         * @private
         */
         _oDepressedControl = null,
-
-        /**
-        * When the user presses Enter to perform a Spotlight select, we keep track
-        * of the target on keydown. If the target disappears before keyup, we end
-        * the hold gesture immediately and suppress the selection when the keyup
-        * occurs.
-        * @type {Object}
-        * @default null
-        * @private
-        */
-       _o5WaySelectTarget = null,
 
         /**
         * In verbose mode, Spotlight prints 1) Current 2) Pointer mode change to `enyo.log`.
@@ -198,6 +175,54 @@ enyo.Spotlight = new function() {
         */
         _nPointerHiddenToKeyTimeout = 300,
 
+        /**
+        * Whether key is in pressed state.
+        * @type {Boolean}
+        * @default false
+        * @private
+        */
+        _bHold = false,
+
+        /**
+        * Length of time in milliseconds of key hold.
+        * @type {Number}
+        * @default 0
+        * @private
+        */
+        _holdStart = 0,
+
+        /**
+        * The function that is sending `onholdulse`.
+        * @type {Function}
+        * @default null
+        * @private
+        */
+        _holdJobFunction = null,
+
+        /**
+        * The job that is sending `onholdpulse`.
+        * @type {Function}
+        * @default null
+        * @private
+        */
+        _holdJob = null,
+
+        /**
+        * Whether `onholdpulse` has been fired.
+        * @type {Boolean}
+        * @default false
+        * @private
+        */
+        _sentHold = false,
+
+        /**
+        * Whether holdPulse has been canceled.
+        * @type {Boolean}
+        * @default false
+        * @private
+        */
+        _bCancelHold = false,
+        
         /**
         * If a key down was ignored, be sure to ignore the following key up. Specifically, this
         * works around the different target keyup for Enter for inputs (input on down, body on up).
@@ -285,12 +310,6 @@ enyo.Spotlight = new function() {
                 return;
             }
             _onDisappear.isOff = true;
-
-            if (_oCurrent === _o5WaySelectTarget) {
-                enyo.gesture.drag.endHold();
-                _o5WaySelectTarget = null;
-            }
-
             var oControl = _oDefaultDisappear;
 
             // Nothing is set in defaultSpotlightDisappear
@@ -380,7 +399,7 @@ enyo.Spotlight = new function() {
             var oExCurrent = _oCurrent;
 
             // Remove spotlight class and Blur
-            _oThis.unspot(oControl);
+            _oThis.unspot();
 
             // Add spotlight class
             _highlight(oControl);
@@ -392,8 +411,6 @@ enyo.Spotlight = new function() {
                 _observeDisappearance(false, oExCurrent);
                 _observeDisappearance(true, _oCurrent);
             }, 1);
-
-            enyo.Spotlight.Container.fireContainerEvents(oExCurrent || _oLastControl, _oCurrent);
 
             _log('CURRENT =', _oCurrent.toString());
             enyo.Signals.send('onSpotlightCurrentChanged', {
@@ -467,7 +484,8 @@ enyo.Spotlight = new function() {
         _is5WayKey = function(oEvent) {
 
             // 13==Enter, 16777221==KeypadEnter
-            return (enyo.indexOf(oEvent.keyCode, [37, 38, 39, 40, 13, 16777221]) > -1);
+            //return (enyo.indexOf(oEvent.keyCode, [37, 38, 39, 40, 13, 16777221]) > -1);
+            return (enyo.indexOf(oEvent.keyCode, [4, 5, 29460, 29461, 29443]) > -1);
         },
 
         /**
@@ -682,13 +700,13 @@ enyo.Spotlight = new function() {
         */
         _getSpotDirection = function(oEvent) {
             switch (oEvent.keyCode) {
-                case 37:
+                case 4:
                     return "LEFT";
-                case 38:
+                case 29460:
                     return "UP";
-                case 39:
+                case 5:
                     return "RIGHT";
-                case 40:
+                case 29461:
                     return "DOWN";
             }
         };
@@ -702,22 +720,6 @@ enyo.Spotlight = new function() {
         // Events only processed when Spotlight initialized with a root
         if (this.isInitialized()) {
             switch (oEvent.type) {
-                case 'focus':
-                    if (oEvent.target === window) {
-                        // Update pointer mode from cursor visibility platform API
-                        if (window.PalmSystem && window.PalmSystem.cursor) {
-                            this.setPointerMode( window.PalmSystem.cursor.visibility );
-                        }
-                        // Whenever app goes to foreground, refocus on last focused control
-                        this.spot(this.getLastControl());
-                    }
-                    break;
-                case 'blur':
-                    if (oEvent.target === window) {
-                        // Whenever app goes to background, unspot focus
-                        this.unspot();
-                    }
-                    break;
                 case 'move':
 
                     // Only register mousemove if the x/y actually changed,
@@ -767,7 +769,7 @@ enyo.Spotlight = new function() {
                 //enyo.log('Dummy function');
             };
         };
-        enyo.gesture.drag.prepareHold(oEvent);
+        this.initiateHoldPulse(oEvent);
         switch (oEvent.type) {
             case 'keydown':
                 return _dispatchEvent('onSpotlightKeyDown', oEvent);
@@ -902,6 +904,9 @@ enyo.Spotlight = new function() {
                 this.unspot();
             }
         }
+
+        // There is a edge case that onSpotlightKeyUp is not comming
+        this.stopHold();
     };
 
     // Called by `onEvent()` to process mousedown events.
@@ -933,7 +938,7 @@ enyo.Spotlight = new function() {
         oEvent.preventDefault();
 
         var oEventClone = enyo.clone(oEvent);
-        oEventClone.keyCode = 13;
+        oEventClone.keyCode = 29443;
         oEventClone.domEvent = oEvent;
         oEventClone.allowDomDefault = enyo.nop;
 
@@ -954,7 +959,7 @@ enyo.Spotlight = new function() {
         oEvent.preventDefault();
 
         var oEventClone = enyo.clone(oEvent);
-        oEventClone.keyCode = 13;
+        oEventClone.keyCode = 29443;
         oEventClone.domEvent = oEvent;
 
         _dispatchEvent('onSpotlightKeyUp', oEventClone, _oDepressedControl);
@@ -987,8 +992,6 @@ enyo.Spotlight = new function() {
 
     // Called by `onEvent()` to process keydown.
     this.onKeyDown = function(oEvent) {
-
-        _bSuppressSelectOnNextKeyUp = false;
 
         if (_isIgnoredKey(oEvent)) {
             _nIgnoredKeyDown = oEvent.which;
@@ -1030,15 +1033,22 @@ enyo.Spotlight = new function() {
             var bWasPointerMode = this.getPointerMode();
             this.setPointerMode(false);
 
-            // Spot first available control on bootstrap
-            if (!this.isSpottable(this.getCurrent()) ||
-                // Or does this immediately follow KEY_POINTER_HIDE
-                (!_isTimestampExpired() && !_oLastMouseMoveTarget) || 
-                // Or spot last 5-way control, only if there's not already focus on screen
-                (bWasPointerMode && !_oLastMouseMoveTarget && !this.isFrozen())) {
+            if (!this.isSpottable(this.getCurrent())) {
 
+                // Spot first available control on bootstrap
                 _spotNearestToPointer(oEvent);
-                _bSuppressSelectOnNextKeyUp = oEvent.keyCode == 13;
+                return false;
+            }
+
+            // Does this immediately follow KEY_POINTER_HIDE
+            if (!_isTimestampExpired() && !_oLastMouseMoveTarget) {
+                _spotNearestToPointer(oEvent);
+                return false;
+            }
+
+            // Spot last 5-way control, only if there's not already focus on screen
+            if (bWasPointerMode && !_oLastMouseMoveTarget && !this.isFrozen()) {
+                _spotNearestToPointer(oEvent);
                 return false;
             }
         }
@@ -1048,7 +1058,6 @@ enyo.Spotlight = new function() {
         if (_isPointingAway()) {
             return false;
         }
-
         enyo.Spotlight.Accelerator.processKey(oEvent, this.onAcceleratedKey, this);
 
         // Always allow key events to bubble regardless of what onSpotlight** handlers return
@@ -1059,12 +1068,6 @@ enyo.Spotlight = new function() {
         if (_nIgnoredKeyDown === oEvent.which || _isIgnoredKey(oEvent)) {
             return false;
         }
-
-        if (_bSuppressSelectOnNextKeyUp) {
-            _bSuppressSelectOnNextKeyUp = false;
-            return true;
-        }
-
         enyo.Spotlight.Accelerator.processKey(oEvent, this.onAcceleratedKey, this);
 
         // Always allow key events to bubble regardless of what onSpotlight** handlers return
@@ -1089,14 +1092,14 @@ enyo.Spotlight = new function() {
 
     this.onSpotlightKeyUp = function(oEvent) {
         var ret = true;
-
         switch (oEvent.keyCode) {
-            case 13:
-                if (oEvent.originator === _o5WaySelectTarget) {
-                    ret = _dispatchEvent('onSpotlightSelect', oEvent);
-                    enyo.gesture.drag.endHold();
-                }
-                _o5WaySelectTarget = null;
+            case 29443:
+                enyo.mixin(oEvent, {
+                    sentHold: _sentHold
+                });
+                ret = _dispatchEvent('onSpotlightSelect', oEvent);
+                this.stopHold(oEvent);
+                this.resetHold();
         }
 
         // Should never get here
@@ -1105,19 +1108,15 @@ enyo.Spotlight = new function() {
     this.onSpotlightKeyDown = function(oEvent) {
 
         switch (oEvent.keyCode) {
-            case 13:
-                if (!enyo.Spotlight.Accelerator.isAccelerating()) {
-                    _o5WaySelectTarget = oEvent.originator;
-                    enyo.gesture.drag.beginHold(oEvent);
-                }
-                return true;
-            case 37:
+            case 29443:
+                return this.beginHold(oEvent);
+            case 4:
                 return _dispatchEvent('onSpotlightLeft', oEvent);
-            case 38:
+            case 29460:
                 return _dispatchEvent('onSpotlightUp', oEvent);
-            case 39:
+            case 5:
                 return _dispatchEvent('onSpotlightRight', oEvent);
-            case 40:
+            case 29461:
                 return _dispatchEvent('onSpotlightDown', oEvent);
         }
 
@@ -1505,7 +1504,8 @@ enyo.Spotlight = new function() {
     * @return {Boolean} - `true` if control was successfully blurred; otherwise, `false`.
     * @private
     */
-    this.unspot = function(oNext) {
+    this.unspot = function() {
+
         // Current cannot change while in frozen mode
         if (this.isFrozen()) {
             return false;
@@ -1514,7 +1514,7 @@ enyo.Spotlight = new function() {
         if (this.hasCurrent() && _bFocusOnScreen) {
             _unhighlight(_oCurrent);
             _oLastMouseMoveTarget = null;
-            _dispatchEvent('onSpotlightBlur', {next: oNext}, _oCurrent);
+            _dispatchEvent('onSpotlightBlur', null, _oCurrent);
             _observeDisappearance(false, _oCurrent);
             _oCurrent = null;
             return true;
@@ -1611,11 +1611,11 @@ enyo.Spotlight = new function() {
     * @private
     */
     this.freeze = function() {
-		if (this.hasCurrent()) {
-			_bFrozen = true;
-		} else {
-			_warn('Can not enter frozen mode until something is spotted');
-		}
+        if (this.hasCurrent()) {
+            _bFrozen = true;
+        } else {
+            _warn('Can not enter frozen mode until something is spotted');
+        }
     };
 
     /**
@@ -1624,8 +1624,8 @@ enyo.Spotlight = new function() {
     * @private
     */
     this.unfreeze = function() { 
-		_bFrozen = false;
-	};
+        _bFrozen = false;
+    };
 
     /**
     * Determines whether frozen mode is currently enabled.
@@ -1657,6 +1657,126 @@ enyo.Spotlight = new function() {
     this.unhighlight = function(oControl) {
         _unhighlight(oControl);
     };
+
+    //* Emulate holdPulse for onSpotlightkeyDown event
+    //* To-do: These are not public functions. Move to private.
+    /************************************************************/
+
+    /**
+    * Decorates event to let user call `configureHoldPulse()` function.
+    *
+    * @param {Object} oEvent - The event to decorate.
+    * @private
+    */
+    this.initiateHoldPulse = function(oEvent) {
+
+        // Set holdpulse defaults and expose method for configuring holdpulse options
+        if (oEvent.keyCode === 29443) {
+            enyo.gesture.drag.holdPulseConfig = enyo.clone(enyo.gesture.drag.holdPulseDefaultConfig);
+            oEvent.configureHoldPulse = enyo.gesture.configureHoldPulse;
+            oEvent.cancelHoldPulse = enyo.bind(this, "cancelHold");
+        }
+    };
+
+    /**
+    * Gets default `holdPulse` delay if not initialized by down event.
+    *
+    * @param {Object} oEvent - The current event.
+    * @return {Number} The `holdPulse` delay.
+    * @private
+    */
+    this.getHoldPulseDelay = function(oEvent) {
+        var drag = enyo.gesture.drag;
+        return Object.keys(drag.holdPulseConfig).length > 0 ? drag.holdPulseConfig.delay : drag.holdPulseDefaultConfig.delay;
+    };
+
+    /**
+    * Initializes relevant variables and starts holdPulse job.
+    *
+    * @param {Object} oEvent - The current event.
+    * @return {Boolean} - `true` if successful; otherwise, `false`.
+    * @private
+    */
+    this.beginHold = function(oEvent) {
+
+        // Prevent consecutive hold start
+        if (_bHold) {
+            return;
+        }
+
+        _bHold = true;
+        _holdStart = enyo.perfNow();
+
+        // clone the event to ensure it stays alive on IE upon returning to event loop
+        var $ce = enyo.clone(oEvent);
+        $ce.srcEvent = enyo.clone(oEvent.srcEvent);
+        _holdJobFunction = enyo.bind(this, "sendHoldPulse", $ce);
+        _holdJobFunction.ce = $ce;
+        _holdJob = setInterval(_holdJobFunction, this.getHoldPulseDelay(oEvent));
+
+        return true;
+    };
+
+    /**
+    * Clears relevant variables and cancels holdPulse job.
+    *
+    * @param {Object} oEvent - The current event.
+    * @private
+    */
+    this.stopHold = function(oEvent) {
+
+        // Do nothing if not in hold status
+        if (!_bHold) {
+            return;
+        }
+
+        clearInterval(_holdJob);
+        _holdJob = null;
+        _bHold = false;
+        _holdStart = 0;
+        if (_holdJobFunction) {
+            _holdJobFunction.ce = null;
+            _holdJobFunction = null;
+        }
+        if (_sentHold) {
+            _sentHold = false;
+        }
+        this.resetHold();
+    };
+
+    /**
+    * Resets holdPulse job.
+    *
+    * @private
+    */
+    this.resetHold = function() {
+        _bCancelHold = false;
+    };
+
+    /**
+    * Cancels holdPulse job.
+    *
+    * @private
+    */
+    this.cancelHold = function(oEvent) {
+        _bCancelHold = true;
+    };
+
+    /**
+    * Sends `onHoldPulse` event with `holdTime` parameter.
+    *
+    * @private
+    */
+    this.sendHoldPulse = function(oEvent) {
+        if (_bCancelHold) {
+            return;
+        }
+        if (!_sentHold) {
+            _sentHold = true;
+        }
+        oEvent.holdTime = enyo.perfNow() - _holdStart;
+        _dispatchEvent('onholdpulse', oEvent);
+    };
 };
 
 // Event hook to all system events to catch keypress and mouse events.
@@ -1672,16 +1792,16 @@ enyo.rendered(function(oRoot) {
 
 
 // enyo.Spotlight.bench = new function() {
-// 	var _oBench = null;
+//  var _oBench = null;
 //
-// 	this.start = function() {
-// 		if (!_oBench) {
-// 			_oBench = enyo.dev.bench({name: 'bench1', average: true});
-// 		}
-// 		_oBench.start();
-// 	}
+//  this.start = function() {
+//      if (!_oBench) {
+//          _oBench = enyo.dev.bench({name: 'bench1', average: true});
+//      }
+//      _oBench.start();
+//  }
 //
-// 	this.stop = function() {
-// 		_oBench.stop();
-// 	}
+//  this.stop = function() {
+//      _oBench.stop();
+//  }
 // }
